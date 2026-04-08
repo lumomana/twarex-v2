@@ -1,65 +1,63 @@
-# Instructions pour générer le fichier APK de Twarex
+# 📦 Instructions de build — Twarex (APK Android)
 
-Comme vous souhaitez utiliser l'application localement, vous devez générer le fichier APK (Android Package) vous-même. Voici les étapes à suivre sur votre ordinateur :
+## Prérequis
 
-## 1. Prérequis
+- **Node.js** 18+
+- **pnpm** (recommandé) ou npm
+- Un compte **Expo** gratuit sur [expo.dev](https://expo.dev)
+- **EAS CLI** ≥ 12.0.0
 
-Assurez-vous d'avoir les éléments suivants installés sur votre machine :
-*   **Node.js** (version 18 ou supérieure)
-*   **npm** ou **pnpm**
-*   Un compte **Expo** (gratuit sur [expo.dev](https://expo.dev))
-
-## 2. Installation des outils de build
-
-Ouvrez un terminal et installez l'outil de ligne de commande Expo Application Services (EAS) :
+## 1. Cloner et installer
 
 ```bash
+git clone https://github.com/lumomana/twarex-v2.git
+cd twarex-v2
+pnpm install
+```
+
+## 2. Installer EAS CLI
+
+```bash
+pnpm add -g eas-cli
+# ou
 npm install -g eas-cli
 ```
 
-## 3. Connexion à votre compte Expo
-
-Connectez-vous à votre compte Expo dans le terminal :
+## 3. Se connecter à Expo
 
 ```bash
 eas login
 ```
 
-## 4. Configuration du projet (si nécessaire)
-
-Si c'est la première fois que vous lancez un build, initialisez le projet EAS :
+## 4. Lancer le build preview (APK)
 
 ```bash
-eas build:configure
+eas build --platform android --profile preview
 ```
 
-## 5. Génération de l'APK
+Une fois le build terminé, EAS te fournit un lien de téléchargement `.apk`.
 
-Lancez la commande suivante pour générer le fichier APK pour Android :
+## 5. Installer l'APK sur Android
+
+1. Copie le `.apk` sur ton téléphone (USB, cloud, email…)
+2. Ouvre le fichier avec un gestionnaire de fichiers
+3. Autorise l'installation depuis sources inconnues si demandé
+4. Lance l'app depuis ton écran d'accueil
+
+---
+
+## Build local (optionnel, nécessite Android SDK)
 
 ```bash
 eas build --platform android --profile preview --local
 ```
 
-**Note sur l'option `--local`** :
-*   L'option `--local` permet de compiler l'APK directement sur votre machine au lieu d'utiliser les serveurs d'Expo.
-*   Cela nécessite d'avoir configuré l'environnement Android (Android SDK, Java, etc.) sur votre ordinateur.
-*   Si vous n'avez pas d'environnement Android configuré, vous pouvez retirer `--local` pour laisser Expo compiler l'APK pour vous (cela peut prendre quelques minutes et nécessite une connexion internet).
+---
 
-## 6. Récupération et Installation
+## Profils disponibles
 
-Une fois le build terminé, vous obtiendrez un lien vers le fichier `.apk` (si build sur serveur) ou le fichier sera généré dans votre dossier local.
-
-1.  Transférez le fichier APK sur votre téléphone Android.
-2.  Ouvrez le fichier sur votre téléphone.
-3.  Si votre téléphone bloque l'installation, allez dans les paramètres et autorisez "l'installation depuis des sources inconnues" pour votre gestionnaire de fichiers ou navigateur.
-4.  Installez et lancez **Twarex** !
-
-## 7. Importation de votre archive Twitter
-
-Une fois l'application lancée :
-1.  Allez dans l'onglet **Profil**.
-2.  Appuyez sur **Paramètres d'archive**.
-3.  Appuyez sur **Importer une archive Twitter**.
-4.  Sélectionnez votre fichier ZIP d'archive Twitter.
-5.  Attendez la fin du traitement et explorez vos tweets !
+| Profil | Type | Usage |
+|---|---|---|
+| `development` | APK debug | Dev avec Expo Dev Client |
+| `preview` | APK release | Test local/distribution interne |
+| `production` | AAB | Google Play Store |

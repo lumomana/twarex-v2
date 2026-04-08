@@ -1,43 +1,46 @@
 {
   "expo": {
-    "name": "Twitter Archive Explorer",
-    "slug": "twitter-archive-explorer",
+    "name": "Twarex",
+    "slug": "twarex",
     "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "twitter-explorer",
+    "scheme": "twarex",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/splash-icon.png",
+      "image": "./assets/images/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#F1E2BE"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.lumomana.twarex"
     },
     "android": {
-      "package": "com.lumomana.twitterexplorer",
+      "package": "com.lumomana.twarex",
       "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#F1E2BE"
-      },
-      "permissions": [
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
-      ]
+      }
     },
     "web": {
       "bundler": "metro",
       "output": "static",
-      "baseUrl": "/twitter-archive-explorer"
+      "baseUrl": "/twarex"
     },
     "plugins": [
       [
         "expo-router",
         {
-          "origin": "https://lumomana.github.io/twitter-archive-explorer/"
+          "origin": "https://lumomana.github.io/twarex/"
+        }
+      ],
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
         }
       ]
     ],
