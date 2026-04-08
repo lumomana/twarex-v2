@@ -7,6 +7,7 @@ import { Download, FileUp, RefreshCw, HelpCircle, AlertTriangle, CheckCircle, X,
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import { parseTwitterArchive, validateTwitterArchive } from '@/utils/archiveParser';
+import type { ArchiveData } from '@/types/twitter';
 import { mockTwitterArchive } from '@/mocks/twitterData';
 
 export default function ArchiveSettingsScreen() {
@@ -43,7 +44,9 @@ export default function ArchiveSettingsScreen() {
       setArchiveSource('imported');
       
       setImportStatus('success');
-      setImportMessage(`Archive imported successfully! (${archiveData.totalTweets} tweets)`);
+      setImportMessage(
+        `Archive importée avec succès ! ${archiveData.totalTweets.toLocaleString()} tweets chargés.`
+      );
       
       // Reset after a delay
       setTimeout(() => {
@@ -62,7 +65,6 @@ export default function ArchiveSettingsScreen() {
     if (Platform.OS === 'web') {
       // Use native HTML file input for web to avoid expo-document-picker issues
       const input = document.createElement('input');
-      input.type = 'input'; // Just in case, but usually 'file'
       input.setAttribute('type', 'file');
       input.setAttribute('accept', '.zip,application/zip,application/x-zip-compressed');
       
