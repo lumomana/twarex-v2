@@ -2,50 +2,30 @@
  * archiveParser.ts
  * Parsing complet des archives Twitter/X au format ZIP.
  *
- * Produit exactement le type ArchiveData défini dans @/types/twitter :
- *   { years: YearData[], totalTweets: number }
+ * STRATÉGIE MÉMOIRE :
+ * On utilise react-native-zip-archive pour extraire le ZIP
+ * directement sur le système de fichiers (natif Java/Kotlin),
+ * sans jamais charger le ZIP en RAM. Cela permet de traiter
+ * des archives de plusieurs GB sans OutOfMemoryError.
  *
- * Compatible avec l'interface de archive-settings.tsx :
- *   validateTwitterArchive(input) → { valid, message? }
- *   parseTwitterArchive(input)    → ArchiveData
+ * Flux :
+ *   1. ZIP (disque) → extraction native → dossier temporaire (disque)
+ *   2. Lecture séquentielle des fichiers .js nécessaires
+ *   3. Parsing JSON + construction ArchiveData
+ *   4. Nettoyage du dossier temporaire
  *
- * "input" accepte :
- *   - ArrayBuffer  (web, via FileReader)
- *   - string       (fileUri natif Expo, non utilisé dans le flux actuel
- *                   mais conservé pour usage futur)
+ * Sur web : on garde l'approche ArrayBuffer (archives plus petites
+ * et contraintes différentes).
  */
 
-import JSZip from 'jszip';
 import * as FileSystem from 'expo-file-system';
+import { unzip } from 'react-native-zip-archive';
 import { Platform } from 'react-native';
 import type { ArchiveData, Tweet, DayData, MonthData, YearData } from '@/types/twitter';
 
-export type ArchiveInput = ArrayBuffer | string;
+export type ArchiveInput = ArrayBuffer | string; // string = fileUri natif
 
-// ─── Chargement du ZIP ─────────────────────────────────────────────────────────
-
-async function loadZip(input: ArchiveInput): Promise<JSZip> {
-  let buffer: ArrayBuffer;
-
-  if (typeof input === 'string') {
-    if (Platform.OS === 'web') {
-      throw new Error('fileUri non supporté sur web — utilisez ArrayBuffer.');
-    }
-    const base64 = await FileSystem.readAsStringAsync(input, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    buffer = bytes.buffer;
-  } else {
-    buffer = input;
-  }
-
-  return JSZip.loadAsync(buffer);
-}
-
-// ─── Utilitaires ZIP ───────────────────────────────────────────────────────────
+// ─── Utilitaires JSON ──────────────────────────────────────────────────────────
 
 /**
  * Les fichiers Twitter sont du JS, pas du JSON pur.
@@ -59,28 +39,84 @@ function extractJson(content: string): unknown {
   return JSON.parse(raw.endsWith(';') ? raw.slice(0, -1) : raw);
 }
 
-/** Lit le premier fichier dont le chemin se termine par l'un des suffixes (insensible à la casse). */
-async function readFirst(zip: JSZip, suffixes: string[]): Promise<string | null> {
-  const keys = Object.keys(zip.files);
-  for (const suffix of suffixes) {
-    const match = keys.find(
-      (k) => k.toLowerCase().endsWith(suffix.toLowerCase()) && !zip.files[k].dir
-    );
-    if (match) return zip.files[match].async('string');
+// ─── Lecture de fichiers extraits ─────────────────────────────────────────────
+
+/**
+ * Cherche et lit le premier fichier correspondant à l'un des suffixes
+ * dans le dossier d'extraction. Retourne null si non trouvé.
+ */
+async function readFirstExtracted(
+  extractDir: string,
+  suffixes: string[]
+): Promise<string | null> {
+  try {
+    // Lister récursivement les fichiers du dossier extrait
+    const allFiles = await listFilesRecursive(extractDir);
+    for (const suffix of suffixes) {
+      const match = allFiles.find((f) =>
+        f.toLowerCase().endsWith(suffix.toLowerCase())
+      );
+      if (match) {
+        return await FileSystem.readAsStringAsync(match, {
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+      }
+    }
+    return null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
-/** Lit tous les fichiers dont le chemin contient le fragment donné. */
-async function readAll(zip: JSZip, fragment: string): Promise<string[]> {
-  const keys = Object.keys(zip.files);
-  const matches = keys.filter(
-    (k) => k.toLowerCase().includes(fragment.toLowerCase()) && !zip.files[k].dir
-  );
-  return Promise.all(matches.map((k) => zip.files[k].async('string')));
+/**
+ * Lit tous les fichiers contenant le fragment dans leur chemin.
+ */
+async function readAllExtracted(
+  extractDir: string,
+  fragment: string
+): Promise<string[]> {
+  try {
+    const allFiles = await listFilesRecursive(extractDir);
+    const matches = allFiles.filter((f) =>
+      f.toLowerCase().includes(fragment.toLowerCase())
+    );
+    const results: string[] = [];
+    for (const file of matches) {
+      try {
+        const content = await FileSystem.readAsStringAsync(file, {
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+        results.push(content);
+      } catch { /* fichier illisible ignoré */ }
+    }
+    return results;
+  } catch {
+    return [];
+  }
 }
 
-// ─── Parser de compte (pour récupérer username/displayName) ───────────────────
+/**
+ * Liste récursivement tous les fichiers d'un dossier.
+ */
+async function listFilesRecursive(dir: string): Promise<string[]> {
+  const results: string[] = [];
+  try {
+    const entries = await FileSystem.readDirectoryAsync(dir);
+    for (const entry of entries) {
+      const fullPath = `${dir}/${entry}`;
+      const info = await FileSystem.getInfoAsync(fullPath);
+      if (info.isDirectory) {
+        const subFiles = await listFilesRecursive(fullPath);
+        results.push(...subFiles);
+      } else {
+        results.push(fullPath);
+      }
+    }
+  } catch { /* dossier illisible ignoré */ }
+  return results;
+}
+
+// ─── Parsers de sections ──────────────────────────────────────────────────────
 
 interface AccountInfo {
   username: string;
@@ -119,32 +155,31 @@ function parseProfileInfo(raw: unknown, info: AccountInfo): AccountInfo {
   }
 }
 
-// ─── Parser de tweet individuel → Tweet (types/twitter.ts) ────────────────────
-
-function parseSingleTweet(raw: Record<string, unknown>, account: AccountInfo): Tweet {
-  // Twitter encapsule parfois dans { tweet: { ... } }
+function parseSingleTweet(
+  raw: Record<string, unknown>,
+  account: AccountInfo
+): Tweet {
   const t = (raw.tweet ?? raw) as Record<string, unknown>;
-
   const text = String(t.full_text ?? t.text ?? '');
   const createdAtStr = String(t.created_at ?? '');
-  const createdAt = createdAtStr ? new Date(createdAtStr).toISOString() : new Date(0).toISOString();
+  const createdAt = createdAtStr
+    ? new Date(createdAtStr).toISOString()
+    : new Date(0).toISOString();
 
-  // Médias — préférer extended_entities (inclut les vidéos)
   const entities = (t.entities as Record<string, unknown>) ?? {};
   const extEntities = (t.extended_entities as Record<string, unknown>) ?? {};
+
   const mediaSource: Array<Record<string, unknown>> =
     (extEntities.media as Array<Record<string, unknown>>) ??
-    (entities.media as Array<Record<string, unknown>>) ?? [];
+    (entities.media as Array<Record<string, unknown>>) ??
+    [];
 
   const media: Tweet['media'] = mediaSource
     .map((m) => {
       const rawType = String(m.type ?? 'photo');
-      const type: 'photo' | 'video' = rawType === 'video' || rawType === 'animated_gif'
-        ? 'video' : 'photo';
-
+      const type: 'photo' | 'video' =
+        rawType === 'video' || rawType === 'animated_gif' ? 'video' : 'photo';
       let url = String(m.media_url_https ?? m.media_url ?? '');
-
-      // Pour les vidéos, prendre la variante MP4 de meilleure qualité
       if (rawType === 'video' || rawType === 'animated_gif') {
         const variants =
           ((m.video_info as Record<string, unknown>)
@@ -154,7 +189,6 @@ function parseSingleTweet(raw: Record<string, unknown>, account: AccountInfo): T
           .sort((a, b) => Number(b.bitrate ?? 0) - Number(a.bitrate ?? 0));
         if (mp4s.length) url = String(mp4s[0].url ?? url);
       }
-
       return { type, url };
     })
     .filter((m) => m.url.length > 0);
@@ -175,23 +209,23 @@ function parseSingleTweet(raw: Record<string, unknown>, account: AccountInfo): T
   };
 }
 
-// ─── Construction de la structure YearData[] ──────────────────────────────────
+// ─── Construction YearData[] ──────────────────────────────────────────────────
 
 function buildYearStructure(tweets: Tweet[]): YearData[] {
-  // Grouper par année > mois > jour
-  const byYear: Record<string, Record<string, Record<string, Tweet[]>>> = {};
+  const byYear: Record<
+    string,
+    Record<string, Record<string, Tweet[]>>
+  > = {};
 
   for (const tweet of tweets) {
     const d = new Date(tweet.created_at);
     const year = d.getFullYear().toString();
     const month = `${year}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    const day = d.toISOString().slice(0, 10); // YYYY-MM-DD
-
+    const day = d.toISOString().slice(0, 10);
     ((byYear[year] ??= {})[month] ??= {})[day] ??= [];
     byYear[year][month][day].push(tweet);
   }
 
-  // Convertir en YearData[] trié chronologiquement inversé (plus récent en premier)
   return Object.keys(byYear)
     .sort((a, b) => Number(b) - Number(a))
     .map((year) => {
@@ -202,7 +236,9 @@ function buildYearStructure(tweets: Tweet[]): YearData[] {
             .sort((a, b) => b.localeCompare(a))
             .map((date) => {
               const dayTweets = byYear[year][month][date].sort(
-                (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+                (a, b) =>
+                  new Date(b.created_at).getTime() -
+                  new Date(a.created_at).getTime()
               );
               return {
                 date,
@@ -210,32 +246,199 @@ function buildYearStructure(tweets: Tweet[]): YearData[] {
                 tweets: dayTweets,
               };
             });
-
           return {
             month,
-            tweetCount: days.reduce((sum, d) => sum + d.tweetCount, 0),
+            tweetCount: days.reduce((s, d) => s + d.tweetCount, 0),
             days,
           };
         });
-
       return {
         year,
-        tweetCount: months.reduce((sum, m) => sum + m.tweetCount, 0),
+        tweetCount: months.reduce((s, m) => s + m.tweetCount, 0),
         months,
       };
     });
 }
 
-// ─── API publique ──────────────────────────────────────────────────────────────
+// ─── Parsing depuis dossier extrait ───────────────────────────────────────────
 
-/**
- * Vérifie rapidement si le ZIP est une archive Twitter valide.
- */
+async function parseFromExtractedDir(extractDir: string): Promise<ArchiveData> {
+  // Compte + profil
+  let account: AccountInfo = {
+    username: 'unknown',
+    displayName: 'Unknown',
+    avatarUrl: '',
+    bio: '',
+  };
+  const accountRaw = await readFirstExtracted(extractDir, [
+    'data/account.js',
+    'account.js',
+  ]);
+  if (accountRaw) {
+    try {
+      account = parseAccountInfo(extractJson(accountRaw));
+    } catch { /**/ }
+  }
+  const profileRaw = await readFirstExtracted(extractDir, [
+    'data/profile.js',
+    'profile.js',
+  ]);
+  if (profileRaw) {
+    try {
+      account = parseProfileInfo(extractJson(profileRaw), account);
+    } catch { /**/ }
+  }
+
+  // Tweets — fichier principal + parties multipart
+  const tweetContents: string[] = [];
+  const mainFile = await readFirstExtracted(extractDir, [
+    'data/tweets.js',
+    'data/tweet.js',
+    'tweets.js',
+    'tweet.js',
+  ]);
+  if (mainFile) tweetContents.push(mainFile);
+  const extraParts = await readAllExtracted(extractDir, 'tweets-part');
+  tweetContents.push(...extraParts);
+
+  if (tweetContents.length === 0) {
+    throw new Error(
+      "Aucun fichier de tweets trouvé. Assurez-vous d'utiliser une archive Twitter/X officielle."
+    );
+  }
+
+  // Parsing tweet par tweet
+  const tweets: Tweet[] = [];
+  for (const content of tweetContents) {
+    let parsed: unknown;
+    try {
+      parsed = extractJson(content);
+    } catch (err) {
+      throw new Error(`Erreur de parsing des tweets : ${String(err)}`);
+    }
+    for (const item of parsed as Array<Record<string, unknown>>) {
+      try {
+        tweets.push(parseSingleTweet(item, account));
+      } catch { /* tweet malformé ignoré */ }
+    }
+  }
+
+  if (tweets.length === 0) {
+    throw new Error("L'archive ne contient aucun tweet valide.");
+  }
+
+  return {
+    years: buildYearStructure(tweets),
+    totalTweets: tweets.length,
+  };
+}
+
+// ─── Parsing web (ArrayBuffer) ────────────────────────────────────────────────
+
+async function parseFromArrayBuffer(buffer: ArrayBuffer): Promise<ArchiveData> {
+  // Sur web, JSZip reste la bonne approche (pas de système de fichiers natif)
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(buffer);
+
+  const readFirst = async (suffixes: string[]): Promise<string | null> => {
+    const keys = Object.keys(zip.files);
+    for (const suffix of suffixes) {
+      const match = keys.find(
+        (k) =>
+          k.toLowerCase().endsWith(suffix.toLowerCase()) && !zip.files[k].dir
+      );
+      if (match) return zip.files[match].async('string');
+    }
+    return null;
+  };
+
+  const readAll = async (fragment: string): Promise<string[]> => {
+    const keys = Object.keys(zip.files);
+    const matches = keys.filter(
+      (k) =>
+        k.toLowerCase().includes(fragment.toLowerCase()) && !zip.files[k].dir
+    );
+    return Promise.all(matches.map((k) => zip.files[k].async('string')));
+  };
+
+  let account: AccountInfo = {
+    username: 'unknown',
+    displayName: 'Unknown',
+    avatarUrl: '',
+    bio: '',
+  };
+  const accountRaw = await readFirst(['data/account.js', 'account.js']);
+  if (accountRaw) {
+    try { account = parseAccountInfo(extractJson(accountRaw)); } catch { /**/ }
+  }
+  const profileRaw = await readFirst(['data/profile.js', 'profile.js']);
+  if (profileRaw) {
+    try { account = parseProfileInfo(extractJson(profileRaw), account); } catch { /**/ }
+  }
+
+  const tweetContents: string[] = [];
+  const mainFile = await readFirst([
+    'data/tweets.js', 'data/tweet.js', 'tweets.js', 'tweet.js',
+  ]);
+  if (mainFile) tweetContents.push(mainFile);
+  const extraParts = await readAll('tweets-part');
+  tweetContents.push(...extraParts);
+
+  if (tweetContents.length === 0) {
+    throw new Error(
+      "Aucun fichier de tweets trouvé. Assurez-vous d'utiliser une archive Twitter/X officielle."
+    );
+  }
+
+  const tweets: Tweet[] = [];
+  for (const content of tweetContents) {
+    let parsed: unknown;
+    try { parsed = extractJson(content); } catch (err) {
+      throw new Error(`Erreur de parsing des tweets : ${String(err)}`);
+    }
+    for (const item of parsed as Array<Record<string, unknown>>) {
+      try { tweets.push(parseSingleTweet(item, account)); } catch { /**/ }
+    }
+  }
+
+  if (tweets.length === 0) {
+    throw new Error("L'archive ne contient aucun tweet valide.");
+  }
+
+  return {
+    years: buildYearStructure(tweets),
+    totalTweets: tweets.length,
+  };
+}
+
+// ─── API publique ─────────────────────────────────────────────────────────────
+
 export async function validateTwitterArchive(
   input: ArchiveInput
 ): Promise<{ valid: boolean; message?: string }> {
+  // Validation légère : on vérifie juste l'extension du fichier
+  // pour éviter de charger quoi que ce soit en mémoire
+  if (typeof input === 'string') {
+    const lower = input.toLowerCase();
+    if (!lower.endsWith('.zip')) {
+      return {
+        valid: false,
+        message:
+          "Le fichier doit être un ZIP. Vérifiez qu'il s'agit d'une archive Twitter/X officielle.",
+      };
+    }
+    // Vérifier que le fichier existe
+    const info = await FileSystem.getInfoAsync(input);
+    if (!info.exists) {
+      return { valid: false, message: 'Fichier introuvable.' };
+    }
+    return { valid: true };
+  }
+
+  // Web : validation rapide via JSZip
   try {
-    const zip = await loadZip(input);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(input);
     const files = Object.keys(zip.files).map((f) => f.toLowerCase());
     const hasTweets = files.some(
       (f) =>
@@ -259,83 +462,40 @@ export async function validateTwitterArchive(
   }
 }
 
-/**
- * Parse complètement une archive Twitter ZIP.
- * Retourne exactement le type ArchiveData de @/types/twitter.
- */
-export async function parseTwitterArchive(input: ArchiveInput): Promise<ArchiveData> {
-  // 1. Décompression
-  let zip: JSZip;
+export async function parseTwitterArchive(
+  input: ArchiveInput
+): Promise<ArchiveData> {
+  // ── Web : ArrayBuffer via JSZip ──
+  if (typeof input !== 'string' || Platform.OS === 'web') {
+    if (typeof input !== 'string') {
+      return parseFromArrayBuffer(input);
+    }
+    throw new Error('fileUri non supporté sur web.');
+  }
+
+  // ── Natif : extraction sur disque via react-native-zip-archive ──
+  const extractDir =
+    `${FileSystem.cacheDirectory}twarex-extract-${Date.now()}`;
+
   try {
-    zip = await loadZip(input);
+    // Créer le dossier de destination
+    await FileSystem.makeDirectoryAsync(extractDir, { intermediates: true });
+
+    // Extraction native — ne charge jamais le ZIP en RAM JS
+    await unzip(input, extractDir);
+
+    // Parser depuis les fichiers extraits
+    const result = await parseFromExtractedDir(extractDir);
+
+    return result;
   } catch (err) {
-    throw new Error(`Impossible de décompresser le fichier : ${String(err)}`);
-  }
-
-  const allFiles = Object.keys(zip.files).filter((f) => !zip.files[f].dir);
-  if (allFiles.length === 0) {
-    throw new Error('Le ZIP est vide.');
-  }
-
-  // 2. Informations du compte (pour remplir Tweet.user)
-  let account: AccountInfo = { username: 'unknown', displayName: 'Unknown', avatarUrl: '', bio: '' };
-  const accountRaw = await readFirst(zip, ['data/account.js', 'account.js']);
-  if (accountRaw) {
-    try { account = parseAccountInfo(extractJson(accountRaw)); } catch { /**/ }
-  }
-  const profileRaw = await readFirst(zip, ['data/profile.js', 'profile.js']);
-  if (profileRaw) {
-    try { account = parseProfileInfo(extractJson(profileRaw), account); } catch { /**/ }
-  }
-
-  // 3. Tweets — fichier principal + parties supplémentaires (archives volumineuses)
-  const tweetContents: string[] = [];
-  const mainFile = await readFirst(zip, [
-    'data/tweets.js',
-    'data/tweet.js',
-    'tweets.js',
-    'tweet.js',
-  ]);
-  if (mainFile) tweetContents.push(mainFile);
-
-  // tweets-part2.js, tweets-part3.js, etc.
-  const extraParts = await readAll(zip, 'tweets-part');
-  tweetContents.push(...extraParts);
-
-  if (tweetContents.length === 0) {
     throw new Error(
-      "Aucun fichier de tweets trouvé dans l'archive. " +
-        "Assurez-vous d'utiliser une archive Twitter/X officielle."
+      err instanceof Error ? err.message : `Erreur inattendue : ${String(err)}`
     );
-  }
-
-  // 4. Parsing
-  const tweets: Tweet[] = [];
-  for (const content of tweetContents) {
-    let parsed: unknown;
+  } finally {
+    // Nettoyage systématique du dossier temporaire
     try {
-      parsed = extractJson(content);
-    } catch (err) {
-      throw new Error(`Erreur de parsing des tweets : ${String(err)}`);
-    }
-    for (const item of parsed as Array<Record<string, unknown>>) {
-      try {
-        tweets.push(parseSingleTweet(item, account));
-      } catch {
-        // tweet malformé ignoré silencieusement
-      }
-    }
+      await FileSystem.deleteAsync(extractDir, { idempotent: true });
+    } catch { /**/ }
   }
-
-  if (tweets.length === 0) {
-    throw new Error("L'archive ne contient aucun tweet valide.");
-  }
-
-  // 5. Construction de la structure hiérarchique YearData[]
-  const years = buildYearStructure(tweets);
-
-  return {
-    years,
-    totalTweets: tweets.length,
-  };
 }
